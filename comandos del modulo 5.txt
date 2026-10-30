@@ -1,0 +1,152 @@
+### Práctica 1: Sincronización de carpetas con Rsync y Cron
+
+**En el Servidor Primario (Crear archivos y script):**
+
+```bash
+# 1. Crear carpeta y 100 archivos de prueba
+mkdir -p /mnt/datos/sync_folder && cd /mnt/datos/sync_folder && touch file{1..100}.txt
+
+# 2. Crear script de sincronización
+cat << 'EOF' > /usr/local/bin/sync_script.sh
+#!/bin/bash
+rsync -avz -e ssh /mnt/datos/sync_folder/ root@IP_SERVIDOR_SECUNDARIO:/mnt/datos/sync_folder/
+EOF
+
+# 3. Dar permisos de ejecución al script
+chmod +x /usr/local/bin/sync_script.sh
+
+# 4. Configurar el Crontab para que ejecute cada 1 minuto
+(crontab -l 2>/dev/null; echo "* * * * * /usr/local/bin/sync_script.sh >/dev/null 2>&1") | crontab -
+
+```
+
+---
+
+### Práctica 2: Instalación y configuración del Clúster (Pacemaker + Corosync)
+
+**En ambos nodos (Servidores):**
+
+```bash
+# 1. Instalar paquetes de alta disponibilidad
+dnf install -y pacemaker corosync pcs fence-agents-all
+
+# 2. Habilitar y arrancar el servicio de configuración pcsd
+systemctl enable --now pcsd corosync pacemaker
+
+# 3. Asignar contraseña al usuario hacluster
+echo "hacluster" | passwd --stdin hacluster
+
+```
+
+**Desde el Nodo 1 (Configurar el clúster):**
+
+```bash
+# 1. Autenticar los nodos
+pcs host auth nodo1 nodo2 -u hacluster -p hacluster
+
+# 2. Configurar y sincronizar el clúster
+pcs cluster setup --name mi_cluster nodo1 nodo2
+
+# 3. Iniciar y habilitar el clúster en todos los nodos
+pcs cluster start --all
+pcs cluster enable --all
+
+# 4. Deshabilitar STONITH para entornos de laboratorio (Opcional pero recomendado si no hay fencing físico)
+pcs property set stonith-enabled=false
+pcs property set no-quorum-policy=ignore
+
+# 5. Crear el recurso de IP Flotante (VIP)
+pcs resource create ClusterIP ocf:heartbeat:IPaddr2 ip=192.168.1.100 cidr_netmask=24 op monitor interval=10s
+
+```
+
+---
+
+### Práctica 3: Clúster de Alta Disponibilidad HTTP (Keepalived + Apache)
+
+**En ambos nodos (Instalación base):**
+
+```bash
+# 1. Instalar Apache y Keepalived
+dnf install -y httpd keepalived
+
+# 2. Habilitar servicios
+systemctl enable --now httpd keepalived
+
+```
+
+**En el Servidor 1:**
+
+```bash
+# 1. Crear página web distintiva
+echo "<h1>Servidor 1</h1>" > /var/www/html/index.html
+
+# 2. Configurar Keepalived (/etc/keepalived/keepalived.conf)
+cat << 'EOF' > /etc/keepalived/keepalived.conf
+vrrp_script check_http {
+    script "pidof httpd"
+    interval 2
+    weight 2
+}
+
+vrrp_instance VI_1 {
+    state MASTER
+    interface eth0
+    virtual_router_id 51
+    priority 101
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        192.168.1.200
+    }
+    track_script {
+        check_http
+    }
+}
+EOF
+
+# 3. Reiniciar Keepalived
+systemctl restart keepalived
+
+```
+
+**En el Servidor 2:**
+
+```bash
+# 1. Crear página web distintiva
+echo "<h1>Servidor 2</h1>" > /var/www/html/index.html
+
+# 2. Configurar Keepalived (/etc/keepalived/keepalived.conf)
+cat << 'EOF' > /etc/keepalived/keepalived.conf
+vrrp_script check_http {
+    script "pidof httpd"
+    interval 2
+    weight 2
+}
+
+vrrp_instance VI_1 {
+    state BACKUP
+    interface eth0
+    virtual_router_id 51
+    priority 100
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        192.168.1.200
+    }
+    track_script {
+        check_http
+    }
+}
+EOF
+
+# 3. Reiniciar Keepalived
+systemctl restart keepalived
+
+```
